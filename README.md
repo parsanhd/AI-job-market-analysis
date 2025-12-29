@@ -1,4 +1,4 @@
-# 💼 AI Job Market Analysis & Salary Intelligence
+# 💼 AI Job Market Skill Analysis & Salary Intelligence
 
 **Scalable NLP, Spark, and Machine Learning pipeline** to analyze technical job skills, demand patterns, and estimate salaries from large-scale job posting data.
 
@@ -92,9 +92,19 @@ ML Salary Estimation (XGBoost)
 **Output schema:**
 job_id | extracted_skills
 
-yaml
-Copy code
+```md
+```python
+from spacy.matcher import PhraseMatcher
 
+matcher = PhraseMatcher(nlp.vocab, attr="LOWER")
+matcher.add("SKILLS", skill_patterns)
+
+doc = nlp(description)
+extracted_skills = {
+    doc[start:end].text.lower()
+    for _, start, end in matcher(doc)
+}
+```
 > Skills are extracted individually. Skill combinations are discovered later during analysis.
 
 ---
@@ -107,8 +117,18 @@ Copy code
 **Schema:**
 job_id | skill
 
-yaml
-Copy code
+```md
+```python
+from pyspark.sql import functions as F
+
+df_long = (
+    df
+    .withColumn("skill", F.explode("extracted_skills"))
+    .filter(F.col("skill").isNotNull())
+    .select("job_id", "skill")
+    .distinct()
+)
+```
 
 - Removed null or empty skills  
 - Enforced uniqueness defensively  
@@ -142,8 +162,51 @@ python | sql | 15432
 aws | docker | 11221
 spark | aws | 10987
 
-yaml
-Copy code
+```md
+```python
+# Group unique skills per job
+job_skills = (
+    df_norm
+    .filter(F.col("skill").isNotNull())
+    .filter(F.trim(F.col("skill")) != "")
+    .groupBy("job_id")
+    .agg(F.collect_set("skill").alias("skills"))
+)
+
+# Generate unique skill pairs per job using Spark expressions
+skill_pairs = (
+    job_skills
+    .withColumn(
+        "skill_pairs",
+        expr("""
+            transform(
+                filter(
+                    sequence(0, size(skills) - 1),
+                    i -> i < size(skills) - 1
+                ),
+                i -> transform(
+                    sequence(i + 1, size(skills) - 1),
+                    j -> struct(
+                        skills[i] as skill_a,
+                        skills[j] as skill_b
+                    )
+                )
+            )
+        """)
+    )
+    .select("job_id", F.explode("skill_pairs").alias("pairs"))
+    .select("job_id", F.explode("pairs").alias("pair"))
+    .select("job_id", "pair.skill_a", "pair.skill_b")
+)
+
+# Count co-occurrence across distinct jobs
+skill_bundle_counts = (
+    skill_pairs
+    .groupBy("skill_a", "skill_b")
+    .agg(F.countDistinct("job_id").alias("job_count"))
+    .orderBy(F.desc("job_count"))
+)
+```
 
 ---
 
@@ -185,6 +248,21 @@ A regression model was trained to estimate salaries for these postings.
 - Early stopping using a validation split  
 - Salary values clipped to **$30k–$300k USD**  
 
+```md
+```python
+import xgboost as xgb
+
+model = xgb.XGBRegressor(
+    objective="reg:squarederror",
+    n_estimators=500,
+    max_depth=6,
+    learning_rate=0.05,
+    subsample=0.8,
+    colsample_bytree=0.8,
+    random_state=42,
+    n_jobs=-1
+)
+```
 ---
 
 ### Evaluation Metrics
